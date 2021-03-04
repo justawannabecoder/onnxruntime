@@ -384,39 +384,24 @@ static void GetNewInputIdsFromLogits(int batch_size,
   //   printf("logits uint %hu, float val: %f\n", logits_data[x].value, HalfToFloat(logits_data[x]));
   // }
 
-  // first we need to skip the second (seq len) dimension
-  std::vector<Ort::Float16_t> tmp;
-  int new_size = logits_shape[0] * logits_shape[2];
-  tmp.reserve(new_size);
   int num_elems = logits_shape[0] * logits_shape[1] * logits_shape[2];
   int ltwo = logits_shape[1] * logits_shape[2];
   int skip = (logits_shape[1] - 1) * logits_shape[2];
-  for (int batch_id = 0; batch_id < num_elems; batch_id += ltwo) {  // TODO parallelize on batches
-    for (int k = 0; k < logits_shape[2]; ++k) {
-      tmp.push_back(logits_data[batch_id + skip + k]);
-    }
-  }
-
-  // for (int x = 0; x < 10; ++x) {
-  //   printf("logits_tmp uint %hu, float val: %f\n", tmp[x].value, HalfToFloat(tmp[x].value));
-  // }
 
   // now find the max per onnx batch
-  for (int batch_id = 0; batch_id < new_size; batch_id += logits_shape[2]) {  // TODO parallelize on batches
-    auto max = HalfToFloat(tmp[batch_id].value);
-    // auto max = tmp[batch_id];
-    int64_t max_idx = 0;
-    for (int j = 1; j < logits_shape[2]; ++j) {
-      auto elem = HalfToFloat(tmp[batch_id + j].value);
-      // auto elem = tmp[batch_id + j];
-      if (elem > max) {
-        max = elem;
-        max_idx = j;
-      }
-    }
-    // std::cout << "max: " << max << " next token: " << max_idx << "\n";
+  for (int batch_id = 0; batch_id < num_elems; batch_id += ltwo) {  // TODO parallelize on batches
+    auto tmp = std::max_element(logits_data + batch_id + skip,
+                                logits_data + batch_id + skip + logits_shape[2],
+                                [](const Ort::Float16_t& a, const Ort::Float16_t& b) { return HalfToFloat(a) < HalfToFloat(b); });
+    int64_t max_idx = std::distance(logits_data + batch_id + skip, tmp);
+    // std::cout << " next token: " << max_idx << "\n";
     input_ids.push_back(max_idx);
   }
+}
+
+void GetNewPosnIds(int batch_size, int orig_input_seq_len, int step_id, std::vector<int64_t>& posn_ids) {
+  int new_posn_id = orig_input_seq_len + step_id - 1;
+  posn_ids.assign(batch_size, new_posn_id);
 }
 
 // TODO proper error handling
@@ -569,10 +554,8 @@ OrtStatus* PipelineSession::Run(const std::vector<OrtReq>& req_list, std::vector
 
         // update position ids
         // assume shape of position ids is same as input_ids
-        int new_posn_id = exec_frame.orig_input_seq_len + step_id - 1;
-        std::cout << "new posn id: " << new_posn_id << "\n";
         auto& posn_ids = exec_frame.next_step_input_buffer_map[pcfg.logits_name].data;
-        posn_ids.assign(batch_size, new_posn_id);
+        GetNewPosnIds(batch_size, exec_frame.orig_input_seq_len, step_id, posn_ids);
 
         auto posn_ids_tensor = Ort::Value::CreateTensor<int64_t>(cpu_memory_info, posn_ids.data(), posn_ids.size(),
                                                                  input_ids_shape.data(), input_ids_shape.size());  // TODO don't hardcode type
@@ -817,13 +800,22 @@ int main(int argc, char* argv[]) {
   // Run the pipeline
   OrtStatus* status;
   {
+    Timer t("PipelineSession::Run Warmup");
+    status = pipeline_session.Run(req_list, resp_list, num_steps);
+    std::unique_ptr<OrtStatus, decltype(g_ort->ReleaseStatus)> status_deleter(status, g_ort->ReleaseStatus);
+    if (status) {
+      std::cout << "Execution failed with error " << g_ort->GetErrorMessage(status) << "\n";
+      return -1;
+    }
+  }
+  {
     Timer t("PipelineSession::Run");
     status = pipeline_session.Run(req_list, resp_list, num_steps);
-  }
-  std::unique_ptr<OrtStatus, decltype(g_ort->ReleaseStatus)> status_deleter(status, g_ort->ReleaseStatus);
-  if (status) {
-    std::cout << "Execution failed with error " << g_ort->GetErrorMessage(status) << "\n";
-    return -1;
+    std::unique_ptr<OrtStatus, decltype(g_ort->ReleaseStatus)> status_deleter(status, g_ort->ReleaseStatus);
+    if (status) {
+      std::cout << "Execution failed with error " << g_ort->GetErrorMessage(status) << "\n";
+      return -1;
+    }
   }
 
   std::vector<Ort::Float16_t> valid_results{16464, 15168, 48600, 46534, 48945, 49080};  // for num_steps = 10

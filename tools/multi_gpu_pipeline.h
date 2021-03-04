@@ -162,7 +162,7 @@ struct RequestExecutionFrame {
 };
 
 struct PipelineSession {
-  OrtStatus* Run(const std::vector<OrtReq>& req_vec, std::vector<OrtResp>& resp_vec, int max_steps);
+  OrtStatus* Run(const std::vector<OrtReq>& req_vec, std::vector<OrtResp>& resp_vec, int num_steps);
   void ParseEnsembleJsonFile(const std::string& ensemble_json_file, PipelineConfig& ens);
   PipelineSession(const std::string& ensemble_json_file, Ort::Env& env);
   PipelineSession(const PipelineConfig& ens, Ort::Env& env);
